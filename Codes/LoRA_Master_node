@@ -1,1 +1,203 @@
 
+#include <SPI.h>
+#include <LoRa.h>
+#include "BluetoothSerial.h"
+
+BluetoothSerial BT;
+
+/* PINS */
+#define SS 5
+#define RST 27
+#define DIO0 26
+#define BAND 433E6
+
+#define DEVICE_ID 1
+#define BROADCAST_ID 255
+
+/* MESSAGE TYPES */
+
+#define MSG_TEXT 1
+#define MSG_ACK 2
+#define MSG_SLEEP 3
+#define MSG_WAKE 4
+
+byte msgID = 0;
+bool waitingAck = false;
+unsigned long lastSendTime = 0;
+byte lastMsgID = 0;
+
+String inputString="";
+
+/* PRINT */
+
+void logPrint(String s){
+Serial.print(s);
+BT.print(s);
+}
+
+void logPrintln(String s){
+Serial.println(s);
+BT.println(s);
+}
+
+/* SETUP */
+
+void setup(){
+
+Serial.begin(115200);
+BT.begin("LoRa_MASTER");
+
+SPI.begin(18,19,23,5);
+LoRa.setPins(SS,RST,DIO0);
+
+if(!LoRa.begin(BAND)){
+Serial.println("LoRa init failed");
+while(1);
+}
+
+LoRa.enableCrc();
+LoRa.receive();
+
+logPrintln("MASTER READY");
+}
+
+/* SEND TEXT */
+
+void sendMessage(String msg){
+
+msgID++;
+
+LoRa.beginPacket();
+LoRa.write(BROADCAST_ID);
+LoRa.write(DEVICE_ID);
+LoRa.write(MSG_TEXT);
+LoRa.write(msgID);
+LoRa.write(msg.length());
+LoRa.print(msg);
+LoRa.endPacket();
+
+waitingAck=true;
+lastSendTime=millis();
+lastMsgID=msgID;
+
+logPrint("You: ");
+logPrintln(msg);
+}
+
+/* SLEEP NETWORK */
+
+void sendSleep(){
+
+LoRa.beginPacket();
+LoRa.write(BROADCAST_ID);
+LoRa.write(DEVICE_ID);
+LoRa.write(MSG_SLEEP);
+LoRa.write(0);
+LoRa.write(0);
+LoRa.endPacket();
+
+logPrintln("Network Sleep Command Sent");
+}
+
+/* WAKE NETWORK */
+
+void sendWake(){
+
+LoRa.beginPacket();
+LoRa.write(BROADCAST_ID);
+LoRa.write(DEVICE_ID);
+LoRa.write(MSG_WAKE);
+LoRa.write(0);
+LoRa.write(0);
+LoRa.endPacket();
+
+logPrintln("Network Wake Command Sent");
+}
+
+/* RECEIVE */
+
+void receiveMessage(){
+
+int packetSize=LoRa.parsePacket();
+if(!packetSize) return;
+
+byte recipient=LoRa.read();
+byte sender=LoRa.read();
+byte type=LoRa.read();
+byte id=LoRa.read();
+byte len=LoRa.read();
+
+if(type==MSG_TEXT){
+
+String msg="";
+while(LoRa.available())
+msg+=(char)LoRa.read();
+
+logPrint("Node ");
+logPrint(String(sender));
+logPrint(": ");
+logPrintln(msg);
+
+LoRa.beginPacket();
+LoRa.write(sender);
+LoRa.write(DEVICE_ID);
+LoRa.write(MSG_ACK);
+LoRa.write(id);
+LoRa.write(0);
+LoRa.endPacket();
+}
+
+if(type==MSG_ACK){
+if(waitingAck && id==lastMsgID){
+waitingAck=false;
+logPrintln("✓ Delivered");
+}
+}
+}
+
+/* INPUT */
+
+void readInput(){
+
+while(BT.available()){
+char c=BT.read();
+
+if(c=='\n'||c=='\r'){
+
+if(inputString=="sleep") sendSleep();
+else if(inputString=="wake") sendWake();
+else sendMessage(inputString);
+
+inputString="";
+}
+else inputString+=c;
+}
+
+while(Serial.available()){
+char c=Serial.read();
+
+if(c=='\n'||c=='\r'){
+
+if(inputString=="sleep") sendSleep();
+else if(inputString=="wake") sendWake();
+else sendMessage(inputString);
+
+inputString="";
+}
+else inputString+=c;
+}
+}
+
+/* LOOP */
+
+void loop(){
+
+receiveMessage();
+readInput();
+
+if(waitingAck && millis()-lastSendTime>7000){
+logPrintln("No ACK");
+waitingAck=false;
+}
+
+}
